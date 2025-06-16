@@ -1,0 +1,144 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:17
+    container_name: db_reservas
+    environment:
+      POSTGRES_DB: reservas
+      POSTGRES_USER: reservas_user
+      POSTGRES_PASSWORD: reservas_password
+      POSTGRES_MULTIPLE_DATABASES: usuarios_db,salas_db,reservas_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_volume:/var/lib/postgresql/data
+      - ./init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh
+    networks:
+      - net_reservas
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reservas_user"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  zookeeper_service:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper_reservas
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 5
+      ZOOKEEPER_SYNC_LIMIT: 2
+    ports:
+      - "2181:2181"
+    networks:
+      - net_reservas
+    healthcheck:
+      test: ["CMD-SHELL", "echo srvr | nc localhost 2181"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+  kafka_broker:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka_reservas
+    depends_on:
+      zookeeper_service:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper_service:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka_broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
+    networks:
+      - net_reservas
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --list --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+  usuarios_api:
+    build: ./usuario-service
+    container_name: usuarios_api
+    depends_on:
+      - db
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/usuarios_db
+      SPRING_DATASOURCE_USERNAME: reservas_user
+      SPRING_DATASOURCE_PASSWORD: reservas_password
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka_broker:29092
+      SERVER_PORT: 8081
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      SPRING_LIQUIBASE_ENABLED: false
+    ports:
+      - "8081:8081"
+    networks:
+      - net_reservas
+
+  salas_api:
+    build: ./sala-service
+    container_name: salas_api
+    depends_on:
+      - db
+      - kafka_broker
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/salas_db
+      SPRING_DATASOURCE_USERNAME: reservas_user
+      SPRING_DATASOURCE_PASSWORD: reservas_password
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka_broker:29092
+      SERVER_PORT: 8082
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      SPRING_LIQUIBASE_ENABLED: false
+    ports:
+      - "8082:8082"
+    networks:
+      - net_reservas
+
+  reservas_api:
+    build: ./reserva-service
+    container_name: reservas_api
+    depends_on:
+      - db
+      - kafka_broker
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/reservas_db
+      SPRING_DATASOURCE_USERNAME: reservas_user
+      SPRING_DATASOURCE_PASSWORD: reservas_password
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka_broker:29092
+      SERVER_PORT: 8083
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      SPRING_LIQUIBASE_ENABLED: false
+    ports:
+      - "8083:8083"
+    networks:
+      - net_reservas
+
+  gateway_web:
+    build: ./api-gateway
+    container_name: gateway_web
+    depends_on:
+      - usuarios_api
+      - salas_api
+      - reservas_api
+    ports:
+      - "8080:8080"
+    networks:
+      - net_reservas
+
+volumes:
+  postgres_volume:
+
+networks:
+  net_reservas:
+    driver: bridge
